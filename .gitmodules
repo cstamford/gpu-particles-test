@@ -1,0 +1,12 @@
+[submodule "external/sdl2"]
+	path = external/sdl2
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "external/concurrentqueue"]
+	path = external/concurrentqueue
+	url = https://github.com/cameron314/concurrentqueue.git
+[submodule "external/robin-hood-hashing"]
+	path = external/robin-hood-hashing
+	url = https://github.com/martinus/robin-hood-hashing.git
+[submodule "external/readerwriterqueue"]
+	path = external/readerwriterqueue
+	url = https://github.com/cameron314/readerwriterqueue.git

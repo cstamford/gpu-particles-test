@@ -1,0 +1,176 @@
+layout(local_size_x = 1) in;
+
+struct ParticleTemplate
+{
+    uint count;
+    float lifetime;
+    float scale;
+    float gravity_dir;
+    float gravity;
+    float velocity_dir;
+    float velocity;
+    float acceleration;
+    float angular_velocity;
+    float angular_acceleration;
+    float rand_dir;
+    float rand_lifetime;
+    float rand_velocity;
+    float rand_angular_velocity;
+    float rand_scale;
+    uint one_shot;
+    vec4 col_start;
+    vec4 col_end;
+};
+
+struct ParticleState
+{
+    float lifetime;
+    float scale;
+    vec2 pos;
+    vec2 velocity;
+    float angular_velocity;
+    float age;
+};
+
+layout(std430, binding = 2) buffer ParticleData
+{
+    ParticleTemplate tmp;
+    ParticleState state[];
+};
+
+struct ParticleVert
+{
+    vec2 pos;
+    vec2 uv;
+    vec4 col;
+};
+
+layout(std430, binding = 3) buffer ParticleGeo
+{
+    ParticleVert verts[];
+};
+
+float ray_vs_plane(const vec2 plane_norm, const vec2 plane_pos, const vec2 particle_dir, const vec2 particle_pos)
+{
+    const float factor = dot(plane_norm, particle_dir);
+    if (factor > 1e-6) return dot(plane_pos - particle_pos, plane_norm) / factor;
+    return -1.0f;
+}
+
+uniform uint _steps;
+uniform float _steps_dt;
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+
+    for (int i = 0; i < _steps; ++i)
+    {
+        state[idx].age = min(state[idx].lifetime, state[idx].age + _steps_dt);
+        if (state[idx].age < 0.0f) continue;
+
+        const bool needs_restart = tmp.one_shot == 0 && state[idx].age >= state[idx].lifetime;
+        const bool needs_creation = state[idx].lifetime == 0.0f;
+
+        if (needs_creation || needs_restart)
+        {
+            const float dims = sqrt(tmp.count);
+            const float dims_x = mod(idx, dims);
+            const float dims_y = idx / dims;
+
+            const float ctime = cos(_TIME);
+            const float stime = sin(_TIME);
+
+            const float rng_1 = rand(vec2(dims_x + ctime, dims_y + stime));
+            const float rng_2 = rand(vec2(dims_y + ctime, dims_x - stime));
+            const float rng_3 = rand(vec2(dims_x - ctime, dims_y - stime));
+            const float rng_4 = rand(vec2(dims_y + stime, dims_x - ctime));
+            const float rng_5 = rand(vec2(dims_x - stime, dims_y + ctime));
+
+            const float rand_lifetime = tmp.rand_lifetime * tmp.lifetime * rng_1;
+            const float rand_scale = tmp.rand_scale * tmp.scale * rng_2;
+            const float rand_dir = tmp.rand_dir * (rng_3 - 0.5f);
+            const float rand_velocity = tmp.rand_velocity * tmp.velocity * rng_4;
+            const float rand_angular_velocity = tmp.rand_angular_velocity * tmp.angular_velocity * rng_5;
+
+            state[idx].lifetime = tmp.lifetime - rand_lifetime;
+            state[idx].scale = tmp.scale - rand_scale;
+            state[idx].velocity = vec2(cos(tmp.velocity_dir - rand_dir), sin(tmp.velocity_dir - rand_dir)) * (tmp.velocity - rand_velocity);
+            state[idx].angular_velocity = tmp.angular_velocity - rand_angular_velocity;
+        }
+
+        if (!needs_creation && needs_restart)
+        {
+            state[idx].age = state[idx].age - state[idx].lifetime;
+            state[idx].pos = vec2(0.0f, 0.0f);
+        }
+
+        const vec2 grav_dir = vec2(cos(tmp.gravity_dir), sin(tmp.gravity_dir));
+        state[idx].velocity += tmp.acceleration * _steps_dt + grav_dir * tmp.gravity * _steps_dt;
+        state[idx].angular_velocity += tmp.angular_acceleration * _steps_dt;
+
+        float total_vel = length(state[idx].velocity);
+        float dist = length(total_vel) * _steps_dt;
+        vec2 dir = normalize(state[idx].velocity);
+
+        const vec2 plane_pos[1] = { /* vec2(-50.0f, 0.0f), vec2(50.0f, 0.0f), vec2(0.0f, -50.0f), */ vec2(0.0f, 500.0f) };
+        const vec2 plane_norm[1] = { /* vec2(-1.0f, 0.0f), vec2(1.0f, 0.0f), vec2(0.0f, -1.0f), */ vec2(0.0f, 1.0f) };
+
+        while (dist > 0.0f)
+        {
+            int bounce_count = 0;
+            vec2 bounce_pos = vec2(0.0f, 0.0f);
+            vec2 bounce_dir = vec2(0.0f, 0.0f);
+            vec2 bounce_norm = vec2(0.0f, 0.0f);
+            float bounce_t = 0.0f;
+
+            for (int plane = 0; plane < 1; ++plane)
+            {
+                const float t = ray_vs_plane(plane_norm[plane], plane_pos[plane], dir, state[idx].pos);
+                if (t >= 0.0f && t <= dist)
+                {
+                    bounce_pos += dir * t;
+                    bounce_dir = reflect(dir, plane_norm[plane]);
+                    bounce_norm += plane_norm[plane];
+                    bounce_t = max(bounce_t, t);
+                    ++bounce_count;
+                }
+            }
+
+            if (bounce_count == 0) break;
+
+            state[idx].pos += bounce_pos / bounce_count;
+            dir = bounce_count == 1 ? bounce_dir : -(bounce_norm / bounce_count);
+            dist -= bounce_t;
+            total_vel /= 2.0f;
+        }
+
+        state[idx].pos += dir * dist;
+        state[idx].velocity = dir * total_vel;
+
+        const uint base_idx = (tmp.count - 1 - idx) * 4;
+        const uint v0 = base_idx + 0;
+        const uint v1 = base_idx + 1;
+        const uint v2 = base_idx + 2;
+        const uint v3 = base_idx + 3;
+
+        const float half_size = state[idx].scale / 2.0f;
+        const vec4 col = mix(tmp.col_start, tmp.col_end, state[idx].age / state[idx].lifetime);
+
+        verts[v0].pos = state[idx].pos + vec2(-half_size, -half_size);
+        verts[v0].uv = vec2(0.0f, 0.0f);
+        verts[v0].col = col;
+
+        verts[v1].pos = state[idx].pos + vec2(half_size, -half_size);
+        verts[v1].uv = vec2(1.0f, 0.0f);
+        verts[v1].col = col;
+
+        verts[v2].pos = state[idx].pos + vec2(half_size, half_size);
+        verts[v2].uv = vec2(1.0f, 1.0f);
+        verts[v2].col = col;
+
+        verts[v3].pos = state[idx].pos + vec2(-half_size, half_size);
+        verts[v3].uv = vec2(1.0f, 1.0f);
+        verts[v3].col = col;
+    }
+}
